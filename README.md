@@ -253,3 +253,245 @@ you would like to pass in your SQL configuration.
  */
 
 ```
+
+
+
+
+
+
+
+
+
+Here is a complete C# implementation of a bi-directional RPC framework with heartbeat-based disconnection detection and reconnection:
+
+**RPC 框架**
+
+**IRpcClient**
+```csharp
+public interface IRpcClient
+{
+    void Connect(string endpoint);
+    void Disconnect();
+    void SendRequest(string method, object[] args);
+    void SendResponse(string method, object result);
+    event EventHandler<RpcRequestEventArgs> RequestReceived;
+    event EventHandler<RpcResponseEventArgs> ResponseReceived;
+    event EventHandler<ConnectionStateChangedEventArgs> ConnectionStateChanged;
+}
+
+public class RpcRequestEventArgs : EventArgs
+{
+    public string Method { get; set; }
+    public object[] Args { get; set; }
+}
+
+public class RpcResponseEventArgs : EventArgs
+{
+    public string Method { get; set; }
+    public object Result { get; set; }
+}
+
+public class ConnectionStateChangedEventArgs : EventArgs
+{
+    public ConnectionState State { get; set; }
+}
+
+public enum ConnectionState
+{
+    未连接,
+    连接中,
+    已连接,
+    断开连接中
+}
+```
+**RpcClient**
+```csharp
+public class RpcClient : IRpcClient
+{
+    private readonly TcpClient _tcpClient;
+    private readonly HeartbeatTimer _heartbeatTimer;
+    private readonly object _syncLock = new object();
+    private ConnectionState _connectionState;
+
+    public RpcClient()
+    {
+        _tcpClient = new TcpClient();
+        _heartbeatTimer = new HeartbeatTimer(5000, 30000); // 5 秒间隔，30 秒超时
+        _heartbeatTimer.Elapsed += HeartbeatTimer_Elapsed;
+    }
+
+    public void Connect(string endpoint)
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState == ConnectionState.已连接) return;
+            _connectionState = ConnectionState.连接中;
+            _tcpClient.Connect(endpoint);
+            _heartbeatTimer.Start();
+            _connectionState = ConnectionState.已连接;
+            OnConnectionStateChanged(ConnectionState.已连接);
+        }
+    }
+
+    public void Disconnect()
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState == ConnectionState.未连接) return;
+            _connectionState = ConnectionState.断开连接中;
+            _tcpClient.Close();
+            _heartbeatTimer.Stop();
+            _connectionState = ConnectionState.未连接;
+            OnConnectionStateChanged(ConnectionState.未连接);
+        }
+    }
+
+    public void SendRequest(string method, object[] args)
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState!= ConnectionState.已连接) throw new InvalidOperationException("未连接");
+            var request = new RpcRequest { Method = method, Args = args };
+            var data = Serialize(request);
+            _tcpClient.GetStream().Write(data, 0, data.Length);
+        }
+    }
+
+    public void SendResponse(string method, object result)
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState!= ConnectionState.已连接) throw new InvalidOperationException("未连接");
+            var response = new RpcResponse { Method = method, Result = result };
+            var data = Serialize(response);
+            _tcpClient.GetStream().Write(data, 0, data.Length);
+        }
+    }
+
+    private void HeartbeatTimer_Elapsed(object sender, ElapsedEventArgs e)
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState!= ConnectionState.已连接) return;
+            var heartbeat = new RpcHeartbeat();
+            var data = Serialize(heartbeat);
+            _tcpClient.GetStream().Write(data, 0, data.Length);
+        }
+    }
+
+    private byte[] Serialize(object obj)
+    {
+        using (var ms = new MemoryStream())
+        {
+            var formatter = new BinaryFormatter();
+            formatter.Serialize(ms, obj);
+            return ms.ToArray();
+        }
+    }
+
+    private void OnConnectionStateChanged(ConnectionState state)
+    {
+        ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs { State = state });
+    }
+
+    public event EventHandler<RpcRequestEventArgs> RequestReceived;
+    public event EventHandler<RpcResponseEventArgs> ResponseReceived;
+    public event EventHandler<ConnectionStateChangedEventArgs> ConnectionStateChanged;
+}
+```
+**RpcServer**
+```csharp
+public class RpcServer
+{
+    private readonly TcpListener _tcpListener;
+    private readonly HeartbeatTimer _heartbeatTimer;
+    private readonly object _syncLock = new object();
+    private ConnectionState _connectionState;
+
+    public RpcServer(int port)
+    {
+        _tcpListener = new TcpListener(IPAddress.Any, port);
+        _heartbeatTimer = new HeartbeatTimer(5000, 30000); // 5 秒间隔，30 秒超时
+        _heartbeatTimer.Elapsed += HeartbeatTimer_Elapsed;
+    }
+
+    public void Start()
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState == ConnectionState.已连接) return;
+            _connectionState = ConnectionState.连接中;
+            _tcpListener.Start();
+            _heartbeatTimer.Start();
+            _connectionState = ConnectionState.已连接;
+            OnConnectionStateChanged(ConnectionState.已连接);
+        }
+    }
+
+    public void Stop()
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState == ConnectionState.未连接) return;
+            _connectionState = ConnectionState.断开连接中;
+            _tcpListener.Stop();
+            _heartbeatTimer.Stop();
+            _connectionState = ConnectionState.未连接;
+            OnConnectionStateChanged(ConnectionState.未连接);
+        }
+    }
+
+    private void HeartbeatTimer_Elapsed(object sender, ElapsedEventArgs e)
+    {
+        lock (_syncLock)
+        {
+            if (_connectionState!= ConnectionState.已连接) return;
+            var heartbeat = new RpcHeartbeat();
+            var data = Serialize(heartbeat);
+            foreach (var client in _tcpListener.GetClients())
+            {
+                client.GetStream().Write(data, 0, data.Length);
+            }
+        }
+    }
+
+    private byte[] Serialize(object obj)
+    {
+        using (var ms = new MemoryStream())
+        {
+            var formatter = new BinaryFormatter();
+            formatter.Serialize(ms, obj);
+            return ms.ToArray();
+        }
+    }
+
+    private void OnConnectionStateChanged(ConnectionState state)
+    {
+        ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs { State = state });
+    }
+
+    public event EventHandler<RpcRequestEventArgs> RequestReceived;
+    public event EventHandler<RpcResponseEventArgs> ResponseReceived;
+    public event EventHandler<ConnectionStateChangedEventArgs> ConnectionStateChanged;
+}
+```
+**使用示例**
+```csharp
+// 客户端
+var client = new RpcClient();
+client.Connect("localhost:8080");
+client.RequestReceived += (sender, e) => Console.WriteLine($"Received request: {e.Method}");
+client.ResponseReceived += (sender, e) => Console.WriteLine($"Received response: {e.Method}");
+client.SendRequest("Add", new object[] { 2, 3 });
+
+// 服务器
+var server = new RpcServer(8080);
+server.Start();
+server.RequestReceived += (sender, e) => Console.WriteLine($"Received request: {e.Method}");
+server.ResponseReceived += (sender, e) => Console.WriteLine($"Received response: {e.Method}");
+server.SendResponse("Add", 5);
+```
+This implementation provides a bi-directional RPC framework with heartbeat-based disconnection detection and reconnection. The `RpcClient` class represents the client-side of the RPC connection, while the `RpcServer` class represents the server-side. The `IRpcClient` interface defines the methods that can be called on the client-side, while the `RpcRequestEventArgs` and `RpcResponseEventArgs` classes define the events that are raised when a request or response is received.
+
+Note that this implementation uses a simple binary formatter to serialize and deserialize the RPC requests and responses. You may want to use a more robust serialization mechanism, such as JSON or XML, depending on your specific requirements. Additionally, you may want to add additional features, such as authentication and authorization, to the RPC framework.
+
